@@ -1,7 +1,7 @@
 (() => {
   const STEPS = ['Connect to Metabase', 'Database', 'Select PrimaryEmail', 'Combination', 'Admin clouds', 'Permission cache', 'Authentication users', 'SlackDms list'];
   const state = {
-    step: 0, user: null, apiKeyMode: false, metabaseUrl: '',
+    step: 0, user: null, apiKeyMode: false, metabaseUrl: '', ms: { enabled: false, domain: '', user: null },
     databases: [], db: null, cloudTypes: [], authRules: {}, authRulesAll: {}, codeVersion: 'old',
     sourceType: 'SLACK', destType: '',
     adminEmail: '', adminUser: null, clouds: [], src: null, dst: null,
@@ -99,7 +99,10 @@
 
   // ---------- 1. Home: about + connect to Metabase ----------
   function viewConnect() {
-    const flow = ['Database', 'PrimaryEmail', 'Combination', 'Admin clouds', 'Mapping', 'Authentication users', 'SlackDms list'];
+    // The Microsoft page comes first, the Metabase sign-in follows. A server without Microsoft sign-in
+    // set up (no MS_* in .env) shows it disabled, with a way to carry on, until it is configured.
+    const msGate = !state.ms.user && !(!state.ms.enabled && msSkipped());
+    const flow =['Database', 'PrimaryEmail', 'Combination', 'Admin clouds', 'Mapping', 'Authentication users', 'SlackDms list'];
     view.innerHTML = `
       <div class="home">
         <section class="hero">
@@ -109,17 +112,25 @@
           <p class="lead">See which mapped users are authenticated and which DMs are ready to migrate,
             for Slack, Microsoft Teams and Google Chat.</p>
           <div class="connect">
+            ${msGate ? `
+            ${state.ms.enabled
+              ? `<a class="btn btn-lg" id="msBtn" href="/api/auth/microsoft">${MS_LOGO}Sign in with Microsoft</a>
+            <p class="muted">Step 1 of 2: sign in with your @${esc(state.ms.domain || 'company')} account. Next you sign in to Metabase with your own account.</p>`
+              : `<button class="btn btn-lg" id="msBtn" type="button" disabled>${MS_LOGO}Sign in with Microsoft</button>
+            <p class="muted">Microsoft sign-in is not set up on this server yet: MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET are empty in backend/.env.</p>
+            <button class="btn btn-quiet" id="msSkip" type="button">Continue to Metabase sign-in</button>`}` : `
             <div class="version-pick" role="radiogroup" aria-label="Migration code">
               ${versionChoice('old', 'Old code', 'Teams to Teams: destination users must be provisioned (ProvisionStatus).')}
               ${versionChoice('new', 'New code', 'Teams needs no authentication, only mapping. Slack is still checked.')}
             </div>
+            ${state.ms.user ? `<p class="muted">Signed in with Microsoft as ${esc(state.ms.user.email)}. Step 2 of 2: sign in to Metabase.</p>` : ''}
             <button class="btn btn-lg" id="connectBtn" type="button">Connect to Metabase</button>
             <form id="loginForm" class="login" hidden>
               ${state.appPassword ? '' : '<div class="field"><label for="u">Metabase email</label><input id="u" type="email" autocomplete="username" required maxlength="320"></div>'}
               <div class="field"><label for="p">${state.appPassword ? 'App password' : 'Password'}</label><input id="p" type="password" autocomplete="current-password" required maxlength="1000"></div>
               <button class="btn btn-lg" type="submit" id="loginBtn">Sign in</button>
             </form>
-            <p class="muted">Signs in to ${esc(state.metabaseUrl || 'Metabase')}. Read-only; your password isn't stored.</p>
+            <p class="muted">Signs in to ${esc(state.metabaseUrl || 'Metabase')}. Read-only; your password isn't stored.</p>`}
           </div>
         </section>
 
@@ -171,6 +182,12 @@
       view.querySelectorAll('[data-version]').forEach(x => { x.setAttribute('aria-checked', String(x === b)); x.setAttribute('aria-pressed', String(x === b)); });
       showRules();
     });
+    if (msGate) {
+      state.switchAccount = false;
+      const skip = $('#msSkip');
+      if (skip) skip.onclick = () => { msSkipped(true); viewConnect(); };
+      return;
+    }
     const first = () => $('#u') || $('#p');
     $('#connectBtn').onclick = async () => {
       // API-key mode signs in with the server's key; with APP_PASSWORD set it asks for that password first
@@ -1301,6 +1318,7 @@
       pairFilters: { q: '', ready: '', page: 1, size: 50 }, tab: 'users', jobKey: '', jobBody: null,
       dmFilters: { q: '', type: '', apiCallHit: '', authenticated: '', allMapped: '', page: 1, size: 50 },
       switchAccount: true, upload: null,
+      ms: { ...state.ms, user: null }, // signing out ends the whole session, Microsoft sign-in included
     });
     go(0);
     toast(state.apiKeyMode
@@ -1308,11 +1326,33 @@
       : 'Signed out of Metabase. Sign in with another account.');
   };
 
+  /** Remembers "continue without Microsoft" for this tab, only while the server has no Microsoft sign-in set up. */
+  function msSkipped(set) {
+    try {
+      if (set) sessionStorage.setItem('msSkip', '1');
+      return sessionStorage.getItem('msSkip') === '1';
+    } catch { return !!set; }
+  }
+  // The four-square Microsoft mark (SVG attributes only: the page's CSP forbids inline styles)
+  const MS_LOGO = '<svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true"><rect width="10" height="10" fill="#f25022"/><rect x="11" width="10" height="10" fill="#7fba00"/><rect y="11" width="10" height="10" fill="#00a4ef"/><rect x="11" y="11" width="10" height="10" fill="#ffb900"/></svg>';
+  const MS_ERRORS = {
+    denied: 'Microsoft sign-in was cancelled. Try again.',
+    expired: 'The Microsoft sign-in took too long or was interrupted. Try again.',
+    domain: 'That Microsoft account is not allowed here. Use your company account.',
+    failed: 'Microsoft sign-in failed. Try again, and if it repeats ask the person who runs this server to check its log.',
+  };
+
   (async function init() {
     try {
       const me = await api('/auth/me');
       state.apiKeyMode = me.apiKeyMode; state.appPassword = !!me.appPassword; state.metabaseUrl = me.metabaseUrl;
       state.codeVersion = me.codeVersion === 'new' ? 'new' : 'old';
+      state.ms = { enabled: !!me.microsoft?.enabled, domain: me.microsoft?.domain || '', user: me.microsoft?.user || null };
+      const msError = new URLSearchParams(location.search).get('msError');
+      if (msError) {
+        history.replaceState(null, '', '/');
+        toast(MS_ERRORS[msError] || MS_ERRORS.failed, true);
+      }
       if (me.signedIn) { state.user = me.user; await loadDatabases(); go(1); return; }
     } catch { /* show connect */ }
     go(0);

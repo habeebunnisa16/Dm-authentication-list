@@ -5,6 +5,7 @@ const express = require('express');
 const session = require('express-session');
 const routes = require('./routes');
 const mb = require('./services/metabase');
+const ms = require('./services/microsoft');
 const { jobStore } = require('./services/store');
 const { PrunedMemoryStore } = require('./sessionStore');
 const { securityHeaders, sameOrigin, allowedHosts, isLoopback, rateLimit } = require('./security');
@@ -87,6 +88,13 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: status >= 500 && !err.status ? 'Unexpected error' : err.message || 'Unexpected error' });
 });
 
+if (process.env.MS_TENANT_ID || process.env.MS_CLIENT_ID || process.env.MS_CLIENT_SECRET) {
+  if (!ms.enabled()) console.warn('Microsoft sign-in is off: MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET must all be set.');
+  else {
+    console.log(`Microsoft sign-in is on (@${ms.domain()} accounts). Redirect URI: ${ms.redirectUri()}`);
+    if (!isLoopback(HOST) && !process.env.MS_REDIRECT_URI) console.warn('MS_REDIRECT_URI is not set: it defaults to http://localhost, which only works on this machine.');
+  }
+}
 if (process.env.METABASE_API_KEY && !isLoopback(HOST) && !process.env.APP_PASSWORD) {
   console.warn('METABASE_API_KEY is set and the server is reachable from other machines, but APP_PASSWORD is not set: sign-in is refused until APP_PASSWORD is set.');
 }

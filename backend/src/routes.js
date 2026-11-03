@@ -1,6 +1,7 @@
 const express = require('express');
 const config = require('./config');
 const mb = require('./services/metabase');
+const ms = require('./services/microsoft');
 const q = require('./services/queries');
 const schema = require('./services/schema');
 const { jobStore } = require('./services/store');
@@ -54,10 +55,43 @@ router.get('/auth/me', (req, res) => {
     codeVersion: codeVersionOf(req.session.codeVersion),
     // In API-key mode with APP_PASSWORD set, the Connect form asks for that password
     appPassword: !!process.env.METABASE_API_KEY && !!process.env.APP_PASSWORD,
+    // Optional first gate: sign in with a Microsoft work account, then with Metabase
+    microsoft: { enabled: ms.enabled(), domain: ms.domain(), user: req.session.msUser || null },
   });
 });
 
+// ---------- Step 0 (optional, when MS_* is set): sign in with Microsoft ----------
+router.get('/auth/microsoft', loginIpLimit, (req, res) => {
+  if (!ms.enabled()) return res.status(404).json({ error: 'Microsoft sign-in is not set up on this server' });
+  // The session cookie belongs to one host name: start on the host the redirect URI names (127.0.0.1 vs localhost)
+  const target = new URL(ms.redirectUri());
+  if (target.host !== req.get('host') && !req.query.hop) return res.redirect(`${target.origin}/api/auth/microsoft?hop=1`);
+  const { url, pending } = ms.begin();
+  req.session.msPending = pending;
+  req.session.save(() => res.redirect(url));
+});
+
+router.get('/auth/microsoft/callback', loginIpLimit, ah(async (req, res) => {
+  if (!ms.enabled()) return res.status(404).json({ error: 'Microsoft sign-in is not set up on this server' });
+  const pending = req.session.msPending;
+  delete req.session.msPending;
+  let user;
+  try {
+    user = await ms.complete(req.query, pending);
+  } catch (e) {
+    if (!(e instanceof ms.MsError)) throw e;
+    console.warn(`Microsoft sign-in refused (${e.code}): ${e.message}`);
+    return req.session.save(() => res.redirect(`/?msError=${e.code}`));
+  }
+  // A new session for the new identity; any Metabase session of the old one is closed with it
+  if (req.session.mbToken) await mb.logout(req.session.mbToken);
+  await new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
+  req.session.msUser = user;
+  req.session.save(() => res.redirect('/'));
+}));
+
 router.post('/auth/login', loginIpLimit, loginLimit, ah(async (req, res) => {
+  if (ms.enabled() && !req.session.msUser) return res.status(401).json({ error: 'Sign in with Microsoft first' });
   const { username, password } = req.body || {};
   if (process.env.METABASE_API_KEY) {
     // The API key signs everyone in as the same Metabase user, so the app itself needs a password
@@ -76,8 +110,10 @@ router.post('/auth/login', loginIpLimit, loginLimit, ah(async (req, res) => {
   const me = await mb.currentUser(token).catch(() => ({ email: username }));
   // Signing in as another account: close the previous Metabase session first
   if (req.session.mbToken && req.session.mbToken !== token) await mb.logout(req.session.mbToken);
+  const msUser = req.session.msUser; // regenerate() starts an empty session; the Microsoft sign-in must survive it
   await new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
   {
+    if (msUser) req.session.msUser = msUser;
     req.session.mbToken = token;
     req.session.mbUser = { email: me.email, name: me.common_name || me.first_name || me.email };
     // Old code or new code, chosen on the Connect page: decides which side needs authentication

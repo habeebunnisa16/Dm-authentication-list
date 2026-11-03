@@ -125,6 +125,7 @@ Results open on the SlackDms list (MessageWorkSpace DMs), filtered to authentica
 ## Security and rate limits
 
 - **Listens on this machine only** by default (`HOST=127.0.0.1`). Set `HOST=0.0.0.0` only behind an HTTPS reverse proxy, with `COOKIE_SECURE=true`.
+- **Sign in with Microsoft (optional):** set `MS_TENANT_ID`, `MS_CLIENT_ID` and `MS_CLIENT_SECRET` (from an Entra ID app registration, single tenant, Web redirect URI `http://localhost:4000/api/auth/microsoft/callback`). The Connect page then asks for a `@MS_ALLOWED_DOMAIN` (default `cloudfuze.com`) Microsoft account first, and the Metabase sign-in follows with each person's own Metabase account. On a server, set `MS_REDIRECT_URI` to `https://<host>/api/auth/microsoft/callback` and register that same URI.
 - **API-key mode:** with `METABASE_API_KEY`, everyone signs in as the same Metabase user. Set `APP_PASSWORD` so the Connect button asks for a password; the server warns at start if it is reachable from other machines without one.
 - **Browser protections:** strict Content-Security-Policy, no framing, no sniffing, no referrer, `no-store` on API answers, and cross-site requests that change state are refused (CSRF).
 - **Rate limits:** 10 sign-in attempts per 15 minutes per client, 600 API calls per minute per client, 30 checks per hour and 2 running checks per session. They are kept in memory; restarting the server resets them.

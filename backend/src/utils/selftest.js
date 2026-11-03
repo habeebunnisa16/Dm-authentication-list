@@ -610,6 +610,48 @@ async function billingDeactivated() {
   assert.strictEqual(pa.destCloudStatus, 'INACTIVE');
   assert.strictEqual(pa.destBillingStatus, 'ACTIVE');
   assert.strictEqual(pa.sourceCloudStatus, 'ACTIVE');
+
+  // Sign in with Microsoft: claims are checked, nothing else is trusted
+  const ms = require('../services/microsoft');
+  const TID = '11111111-2222-3333-4444-555555555555';
+  Object.assign(process.env, { MS_TENANT_ID: TID, MS_CLIENT_ID: 'cid', MS_CLIENT_SECRET: 'sec', MS_ALLOWED_DOMAIN: 'cloudfuze.com', MS_REDIRECT_URI: '' });
+  assert.strictEqual(ms.enabled(), true);
+  const claims = (o = {}) => ({
+    aud: 'cid', tid: TID, iss: `https://login.microsoftonline.com/${TID}/v2.0`, exp: Math.floor(Date.now() / 1000) + 3600,
+    nonce: 'n1', preferred_username: 'Pat.Lee@CloudFuze.com', name: 'Pat Lee', oid: 'o1', ...o,
+  });
+  assert.deepStrictEqual(ms.checkClaims(claims(), 'n1'), { email: 'pat.lee@cloudfuze.com', name: 'Pat Lee', oid: 'o1' });
+  const refused = (c, nonce = 'n1') => { try { ms.checkClaims(c, nonce); } catch (e) { return e.code; } return null; };
+  assert.strictEqual(refused(claims({ preferred_username: 'pat@gmail.com' })), 'domain');
+  assert.strictEqual(refused(claims({ preferred_username: 'pat@cloudfuze.com.evil.io' })), 'domain');
+  assert.strictEqual(refused(claims({ tid: '99999999-2222-3333-4444-555555555555', iss: 'https://login.microsoftonline.com/99999999-2222-3333-4444-555555555555/v2.0' })), 'domain');
+  assert.strictEqual(refused(claims({ aud: 'other' })), 'failed');
+  assert.strictEqual(refused(claims({ exp: 1 })), 'expired');
+  assert.strictEqual(refused(claims(), 'other-nonce'), 'failed');
+  // begin() + complete(): PKCE and state, with Microsoft's token endpoint stubbed
+  const { url: msUrl, pending } = ms.begin();
+  const sent = new URL(msUrl).searchParams;
+  assert.strictEqual(sent.get('state'), pending.state);
+  assert.strictEqual(sent.get('code_challenge_method'), 'S256');
+  assert.strictEqual(sent.get('redirect_uri'), 'http://localhost:4000/api/auth/microsoft/callback');
+  const idToken = c => `x.${Buffer.from(JSON.stringify(c)).toString('base64url')}.y`;
+  const realFetch = global.fetch;
+  let tokenReq;
+  global.fetch = async (u, o) => { tokenReq = { u, body: o.body.toString() }; return { ok: true, json: async () => ({ id_token: idToken(claims({ nonce: pending.nonce })) }) }; };
+  try {
+    const who = await ms.complete({ code: 'abc', state: pending.state }, pending);
+    assert.strictEqual(who.email, 'pat.lee@cloudfuze.com');
+    assert.ok(tokenReq.body.includes('code_verifier=' + pending.verifier) && tokenReq.u.includes(TID));
+    const codeOf = p => ms.complete(...p).then(() => null, e => e.code);
+    assert.strictEqual(await codeOf([{ code: 'abc', state: 'wrong' }, pending]), 'expired');
+    assert.strictEqual(await codeOf([{ code: 'abc', state: pending.state }, undefined]), 'expired');
+    assert.strictEqual(await codeOf([{ code: 'abc', state: pending.state }, { ...pending, at: Date.now() - 11 * 60 * 1000 }]), 'expired');
+    assert.strictEqual(await codeOf([{ error: 'access_denied', state: pending.state }, pending]), 'denied');
+    global.fetch = async () => ({ ok: false, json: async () => ({ error: 'invalid_client' }) });
+    assert.strictEqual(await codeOf([{ code: 'abc', state: pending.state }, pending]), 'failed');
+  } finally { global.fetch = realFetch; }
+  for (const k of ['MS_TENANT_ID', 'MS_CLIENT_ID', 'MS_CLIENT_SECRET', 'MS_ALLOWED_DOMAIN', 'MS_REDIRECT_URI']) delete process.env[k];
+  assert.strictEqual(ms.enabled(), false);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
